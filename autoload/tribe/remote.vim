@@ -348,6 +348,56 @@ export def Open(path: string, line: number, col: number): string
   return Result(OK, $'opened {path}')
 enddef
 
+def IsRange(repo: string, range: string): bool
+  # git would take it as an option
+  if range =~ '^-'
+    return false
+  endif
+  system($'git -C {shellescape(repo)} rev-parse {shellescape(range)}')
+  return v:shell_error == 0
+enddef
+
+export def Review(repo: string, range: string): string
+  if !IsRange(repo, range)
+    return Result(ERROR, $'not a revision range in {repo}: {range}')
+  endif
+
+  tabnew
+  execute 'tcd ' .. fnameescape(repo)
+
+  if exists(':Gclog') == 2
+    execute 'Gclog ' .. fnameescape(range)
+  else
+    setline(1, systemlist($'git log -p {shellescape(range)}'))
+    setlocal buftype=nofile bufhidden=wipe filetype=git nomodified
+  endif
+
+  redraw
+  return Result(OK, $'showing {range} in a new tab')
+enddef
+
+export def Reload(): string
+  var autoread = &g:autoread
+  &g:autoread = true
+  var unsaved: list<string>
+  # Files only: a terminal with a running job counts as changed
+  for b in getbufinfo({bufloaded: 1})->filter((_, b) => File(b.bufnr) != null)
+    if b.changed
+      unsaved->add(b.name)
+    else
+      execute $'silent checktime {b.bufnr}'
+    endif
+  endfor
+  &g:autoread = autoread
+  redraw
+
+  if !empty(unsaved)
+    return Result(UNSAVED,
+      $'not reloaded, unsaved changes: {join(unsaved, ", ")}')
+  endif
+  return Result(OK, 'reloaded')
+enddef
+
 export def Replace(path: string, old_file: string, new_file: string): string
   if !filereadable(path)
     return Result(ERROR, $'{path} does not exist, use create')
