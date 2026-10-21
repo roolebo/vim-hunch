@@ -5,9 +5,175 @@ vim9script
 
 const OK = 0
 const ERROR = 1
+const UNSAVED = 3
 
 def Result(status: number, output: string): string
   return $"{status}\n{output}"
+enddef
+
+# Load the file into a buffer without showing it; Release() undoes that
+def Acquire(path: string): dict<any>
+  var target = {
+    path: path,
+    on_disk: filereadable(path),
+    existed: bufexists(path),
+    buf: bufadd(path),
+  }
+  target.loaded = bufloaded(target.buf)
+  bufload(target.buf)
+
+  if !getbufvar(target.buf, '&modified')
+    # Pick up changes made on disk without the W11 prompt
+    var autoread = &g:autoread
+    &g:autoread = true
+    execute $'silent checktime {target.buf}'
+    &g:autoread = autoread
+  endif
+
+  target.lines = getbufline(target.buf, 1, '$')
+  return target
+enddef
+
+# A write that failed halfway may leave the file truncated, and Vim may
+# fail to restore it from the backup
+def Damaged(target: dict<any>): bool
+  return target.on_disk && getbufvar(target.buf, '&modified')
+    && (!filereadable(target.path) || readfile(target.path) != target.lines)
+enddef
+
+# Forced: if saving failed, the change mustn't stay in a hidden buffer.
+# Unless the file got damaged: then the buffer holds its only full text.
+# Returns an error then, else ''.
+def Release(target: dict<any>): string
+  if target.loaded
+    return ''
+  endif
+  if Damaged(target)
+    setbufvar(target.buf, '&buflisted', true)
+    return $'{target.path} may be damaged, its full text is in buffer'
+      .. $' {target.buf}'
+  endif
+
+  if !target.existed
+    execute $'silent! bwipeout! {target.buf}'
+  else
+    execute $'silent! bunload! {target.buf}'
+  endif
+  return ''
+enddef
+
+# Write the buffer from a window that shows it, else from a hidden popup
+def Save(buf: number)
+  var wins = win_findbuf(buf)
+  if !empty(wins)
+    win_execute(wins[0], 'silent write')
+    return
+  endif
+
+  var popup = popup_create(buf, {hidden: true})
+  try
+    win_execute(popup, 'silent write')
+  finally
+    popup_close(popup)
+  endtry
+enddef
+
+# Top line, bottom line and cursor of every window that shows the buffer
+def Views(buf: number): list<dict<any>>
+  return win_findbuf(buf)->mapnew((_, id) => ({
+    id: id,
+    tab: win_id2tabwin(id)[0],
+    topline: getwininfo(id)[0].topline,
+    botline: getwininfo(id)[0].botline,
+    curpos: getcurpos(id),
+  }))
+enddef
+
+# Keep every window on the same text after lines first..last became count lines
+def Restore(views: list<dict<any>>, first: number, last: number, count: number)
+  var delta = count - (last - first + 1)
+  for v in views
+    var topline = v.topline > last ? v.topline + delta : v.topline
+    var lnum = v.curpos[1]
+    if lnum > last
+      lnum += delta
+    elseif lnum >= first
+      lnum = min([lnum, first + count - 1])
+    endif
+
+    var view = {
+      topline: max([topline, 1]),
+      lnum: max([lnum, 1]),
+      col: v.curpos[2] - 1,
+    }
+    win_execute(v.id, $'call winrestview({view})')
+  endfor
+enddef
+
+# Is a line of first..last on screen in the current tab
+def Visible(views: list<dict<any>>, first: number, last: number): bool
+  return views->indexof((_, v) =>
+    v.tab == tabpagenr() && v.topline <= last && v.botline >= first) >= 0
+enddef
+
+def SetLines(buf: number, first: number, last: number, lines: list<string>)
+  var nold = last - first + 1
+  if len(lines) >= nold
+    setbufline(buf, first, lines[: nold - 1])
+    appendbufline(buf, last, lines[nold :])
+  else
+    setbufline(buf, first, lines)
+    deletebufline(buf, first + len(lines), last)
+  endif
+enddef
+
+def Edit(path: string, buf: number, old_lines: list<string>,
+    new_lines: list<string>): string
+  if getbufvar(buf, '&modified')
+    return Result(UNSAVED, $'{path} has unsaved changes in the editor')
+  endif
+  if getbufvar(buf, '&readonly')
+    return Result(ERROR, $'{path} is read-only in the editor')
+  endif
+  if !getbufvar(buf, '&modifiable')
+    return Result(ERROR, $'{path} is not modifiable in the editor')
+  endif
+
+  var text = join(getbufline(buf, 1, '$'), "\n")
+  var old = join(old_lines, "\n")
+  if old == ''
+    return Result(ERROR, 'old text is empty')
+  endif
+  var idx = stridx(text, old)
+  if idx < 0
+    return Result(ERROR, $'old text not found in {path}')
+  endif
+  if stridx(text, old, idx + 1) >= 0
+    return Result(ERROR,
+      $'old text matches more than once in {path}, add more context')
+  endif
+
+  # Replace whole lines: keep the unmatched head of the first line and the
+  # tail of the last line
+  var before = strpart(text, 0, idx)
+  var after = strpart(text, idx + len(old))
+  var first = count(before, "\n") + 1
+  var last = first + count(old, "\n")
+  var head = strpart(before, strridx(before, "\n") + 1)
+  var eol = stridx(after, "\n")
+  var tail = eol < 0 ? after : strpart(after, 0, eol)
+  var lines = split(head .. join(new_lines, "\n") .. tail, "\n", 1)
+
+  var views = Views(buf)
+  var visible = Visible(views, first, last)
+  SetLines(buf, first, last, lines)
+  Restore(views, first, last, len(lines))
+  Save(buf)
+  redraw
+
+  var where = visible ? 'in place' : 'in the background'
+  return Result(OK, $'{path} lines {first}-{last} replaced with '
+    .. $'{len(lines)} lines {where}, saved')
 enddef
 
 # Active selection, else the last one in the current buffer; its region is
@@ -180,4 +346,48 @@ export def Open(path: string, line: number, col: number): string
   endif
   redraw
   return Result(OK, $'opened {path}')
+enddef
+
+export def Replace(path: string, old_file: string, new_file: string): string
+  if !filereadable(path)
+    return Result(ERROR, $'{path} does not exist, use create')
+  endif
+  if filewritable(path) != 1
+    return Result(ERROR, $'{path} is read-only')
+  endif
+
+  var target = Acquire(path)
+  var result: string
+  try
+    result = Edit(path, target.buf, readfile(old_file), readfile(new_file))
+  catch
+    result = Result(ERROR, $'cannot edit {path}: {v:exception}')
+  finally
+    var damaged = Release(target)
+    if damaged != ''
+      result = Result(ERROR, damaged)
+    endif
+  endtry
+  return result
+enddef
+
+export def Create(path: string, content_file: string): string
+  if filereadable(path) || bufexists(path)
+    return Result(ERROR, $'{path} already exists, use replace')
+  endif
+
+  mkdir(fnamemodify(path, ':h'), 'p')
+  var target = Acquire(path)
+  try
+    # A BufNewFile autocmd may have filled the buffer from a template
+    deletebufline(target.buf, 1, '$')
+    setbufline(target.buf, 1, readfile(content_file))
+    Save(target.buf)
+  catch
+    return Result(ERROR, $'cannot create {path}: {v:exception}')
+  finally
+    # The file wasn't on disk, so it can't be damaged
+    Release(target)
+  endtry
+  return Result(OK, $'created {path} in the background, saved')
 enddef
