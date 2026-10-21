@@ -348,6 +348,83 @@ export def Open(path: string, line: number, col: number): string
   return Result(OK, $'opened {path}')
 enddef
 
+def ReviewTab(repo: string): number
+  for tab in range(1, tabpagenr('$'))
+    if gettabvar(tab, 'tribe_review', '') == repo
+      return tab
+    endif
+  endfor
+  return 0
+enddef
+
+def Subjects(): list<string>
+  return getqflist()->mapnew((_, item) => item.text)
+enddef
+
+# The subjects in the review of range and the index of the one the human is
+# on, or {}. Amending a commit changes its hash but keeps its subject.
+def Reviewed(range: string): dict<any>
+  var qf = getqflist({title: 0, idx: 0})
+  if qf.title != $':Gclog {range}' || qf.idx == 0
+    return {}
+  endif
+  return {subjects: Subjects(), idx: qf.idx - 1}
+enddef
+
+# The index of each old subject among the new ones, or -1. Fixups repeat
+# subjects, so they are matched in order: longest common subsequence.
+def Align(old: list<string>, new: list<string>): list<number>
+  var n = len(old)
+  var m = len(new)
+  var lcs = range(n + 1)->map((_, _) => repeat([0], m + 1))
+  for i in range(n - 1, 0, -1)
+    for j in range(m - 1, 0, -1)
+      lcs[i][j] = old[i] == new[j]
+        ? lcs[i + 1][j + 1] + 1
+        : max([lcs[i + 1][j], lcs[i][j + 1]])
+    endfor
+  endfor
+
+  var match = repeat([-1], n)
+  var i = 0
+  var j = 0
+  while i < n && j < m
+    if old[i] == new[j]
+      match[i] = j
+      i += 1
+      j += 1
+    elseif lcs[i + 1][j] >= lcs[i][j + 1]
+      i += 1
+    else
+      j += 1
+    endif
+  endwhile
+  return match
+enddef
+
+# Where the human goes on in the new list: the same commit, else the next
+# one to review. The review goes from the oldest, the log lists the newest
+# first.
+def NextReviewed(match: list<number>, idx: number): number
+  for i in range(idx, 0, -1) + range(idx + 1, len(match) - 1)
+    if match[i] >= 0
+      return match[i]
+    endif
+  endfor
+  return -1
+enddef
+
+# Go to the window with the reviewed commit and return its view, or {}
+def CommitView(): dict<any>
+  for w in gettabinfo(tabpagenr())[0].windows
+    if getwinvar(w, '&filetype') == 'git'
+      win_gotoid(w)
+      return winsaveview()
+    endif
+  endfor
+  return {}
+enddef
+
 def IsRange(repo: string, range: string): bool
   # git would take it as an option
   if range =~ '^-'
@@ -362,18 +439,47 @@ export def Review(repo: string, range: string): string
     return Result(ERROR, $'not a revision range in {repo}: {range}')
   endif
 
-  tabnew
+  var tab = ReviewTab(repo)
+  var reviewed = {}
+  var subject = ''
+  var view = {}
+  if tab > 0
+    reviewed = Reviewed(range)
+    execute $'tabnext {tab}'
+    view = CommitView()
+    only!
+    hide enew
+  else
+    tabnew
+    t:tribe_review = repo
+  endif
   execute 'tcd ' .. fnameescape(repo)
 
   if exists(':Gclog') == 2
     execute 'Gclog ' .. fnameescape(range)
+    if !empty(reviewed)
+      var match = Align(reviewed.subjects, Subjects())
+      var i = NextReviewed(match, reviewed.idx)
+      if i >= 0
+        execute $'cc {i + 1}'
+        subject = Subjects()[i]
+      endif
+      # Only the same commit keeps the view, the next one starts at the top
+      if match[reviewed.idx] >= 0 && !empty(view)
+        winrestview(view)
+      endif
+    endif
   else
     setline(1, systemlist($'git log -p {shellescape(range)}'))
     setlocal buftype=nofile bufhidden=wipe filetype=git nomodified
   endif
 
   redraw
-  return Result(OK, $'showing {range} in a new tab')
+  if tab == 0
+    return Result(OK, $'showing {range} in a new tab')
+  endif
+  var at = empty(subject) ? '' : $' at "{subject}"'
+  return Result(OK, $'showing {range} again{at}')
 enddef
 
 export def Reload(): string
