@@ -25,16 +25,23 @@ def Clear()
 enddef
 
 def Register()
-  if empty(v:servername)
+  var output = system($'tribe can-join')
+  if v:shell_error == 127 && !empty(v:servername)
+    echohl WarningMsg
+    echomsg $'tribe is not installed'
+    echohl None
+  endif
+  if v:shell_error != 0
     return
   endif
-  var output = system($'tribe is-available')
-  if v:shell_error != 0
-    if v:shell_error == 127
-      echohl WarningMsg
-      echomsg $'tribe is not installed'
-      echohl None
-    endif
+  # The address in tribe is a socket path
+  if !has('socketserver')
+    echohl ErrorMsg
+    echomsg 'vim-tribe: Vim lacks +socketserver'
+    echohl None
+    return
+  endif
+  if empty(v:servername)
     return
   endif
   Set('role', 'editor')
