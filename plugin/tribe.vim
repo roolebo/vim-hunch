@@ -9,6 +9,8 @@ if exists("g:loaded_tribe")
 endif
 g:loaded_tribe = 1
 
+const handler = expand('<sfile>:p:h:h') .. '/bin/tribe-handler'
+
 def Set(name: string, value: string)
   var output = system($'tribe set {name} {shellescape(value)}')
   if v:shell_error != 0
@@ -37,6 +39,7 @@ def Register()
   endif
   Set('role', 'editor')
   Set('addr', $'vim-server:{v:servername}')
+  Set('handler', handler)
 enddef
 
 augroup tribe

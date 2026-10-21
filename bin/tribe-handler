@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+#
+# tribe-handler: the tribe editor protocol for Vim.
+#
+# vim-tribe registers this script as the handler of a Vim started with
+# --servername. Each operation calls tribe#remote#* in that Vim through
+# --remote-expr, which replies with the exit status on the first line and
+# the output after it. Never prompts.
+#
+
+set -e
+
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat << EOF
+Usage: $0 vim-server:SOCKET OP [ARGS...]
+
+Operations:
+  context
+  selection
+  read BUFFER [START [END]]
+  open FILE [LINE [COL]]
+  replace FILE OLD NEW
+  create FILE CONTENT
+  review REPO RANGE
+  reload
+EOF
+}
+
+bad_usage() {
+  usage >&2
+  exit 1
+}
+
+vim_str() {
+  printf "'%s'" "${1//\'/\'\'}"
+}
+
+# A file as Vim names its buffer, without . and ..; anything else is a
+# buffer from context and stays as is
+vim_path() {
+  case "$1" in
+    /*) printf 'simplify(%s)' "$(vim_str "$1")" ;;
+    *) vim_str "$1" ;;
+  esac
+}
+
+is_num() {
+  [[ $1 =~ ^[0-9]+$ ]]
+}
+
+if [ "$1" == "-h" -o "$1" == "--help" ]; then
+  usage
+  exit 0
+fi
+[ $# -ge 2 ] || bad_usage
+
+case "$1" in
+  vim-server:*) SOCKET=${1#vim-server:} ;;
+  *) die "Unsupported address: $1, expected vim-server:SOCKET" ;;
+esac
+OP=$2
+shift 2
+
+case "$OP" in
+  context)
+    [ $# -eq 0 ] || bad_usage
+    CALL="Context()"
+    ;;
+  selection)
+    [ $# -eq 0 ] || bad_usage
+    CALL="Selection()"
+    ;;
+  read)
+    [ $# -ge 1 -a $# -le 3 ] || bad_usage
+    is_num "${2:-1}" && is_num "${3:-0}" || bad_usage
+    CALL="Read($(vim_path "$1"), ${2:-1}, ${3:-0})"
+    ;;
+  open)
+    [ $# -ge 1 -a $# -le 3 ] || bad_usage
+    is_num "${2:-0}" && is_num "${3:-0}" || bad_usage
+    CALL="Open($(vim_path "$1"), ${2:-0}, ${3:-0})"
+    ;;
+  replace)
+    [ $# -eq 3 ] || bad_usage
+    CALL="Replace($(vim_path "$1"), $(vim_str "$2"), $(vim_str "$3"))"
+    ;;
+  create)
+    [ $# -eq 2 ] || bad_usage
+    CALL="Create($(vim_path "$1"), $(vim_str "$2"))"
+    ;;
+  review)
+    [ $# -eq 2 ] || bad_usage
+    CALL="Review($(vim_str "$1"), $(vim_str "$2"))"
+    ;;
+  reload)
+    [ $# -eq 0 ] || bad_usage
+    CALL="Reload()"
+    ;;
+  *)
+    bad_usage
+    ;;
+esac
+
+ANSWER=$(vim --servername "$SOCKET" --remote-expr "tribe#remote#$CALL" 2>&1) ||
+  die "Cannot reach Vim at $SOCKET: $ANSWER"
+STATUS=$(head -1 <<< "$ANSWER")
+is_num "$STATUS" || die "Unexpected reply from Vim, update vim-tribe: $ANSWER"
+OUTPUT=$(tail -n +2 <<< "$ANSWER")
+
+if [ "$STATUS" -eq 0 ]; then
+  [ -z "$OUTPUT" ] || printf '%s\n' "$OUTPUT"
+else
+  printf '%s\n' "$OUTPUT" >&2
+fi
+exit "$STATUS"
