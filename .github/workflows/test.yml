@@ -1,0 +1,19 @@
+name: test
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Ubuntu 26.04 packages Vim with +socketserver
+    container: ubuntu:26.04
+    steps:
+      - run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            vim-nox tmux git ca-certificates
+      - uses: actions/checkout@v4
+      # As root every file is writable, so read-only tests can't fail
+      - run: |
+          useradd -m tester
+          chown -R tester .
+          su tester -c test/run

@@ -1,0 +1,399 @@
+#!/usr/bin/env bash
+#
+# test/run: end-to-end tests through bin/tribe-handler.
+#
+# Each test runs its own Vim in a private tmux server. vim-fugitive comes
+# from FUGITIVE, else is fetched.
+#
+
+set -e
+
+CURDIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+ROOT=$(dirname "$CURDIR")
+HANDLER=$ROOT/bin/tribe-handler
+FUGITIVE_VERSION=v3.7
+: ${FUGITIVE:=${XDG_CACHE_HOME:-$HOME/.cache}/vim-tribe/vim-fugitive}
+DIR=$(mktemp -d)
+FAILED=0
+
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat << EOF
+Usage: $0 [TEST...]
+
+Runs the given tests, or all of them:
+$(declare -F | cut -d' ' -f3 | grep '^test_' | sed 's/^/  /')
+EOF
+}
+
+t() {
+  tmux -L "vim-tribe-test-$$" "$@"
+}
+
+fetch_fugitive() {
+  [ -d "$FUGITIVE" ] && return
+  git -c advice.detachedHead=false clone -q --depth 1 -b "$FUGITIVE_VERSION" \
+    https://github.com/tpope/vim-fugitive "$FUGITIVE" ||
+    die "Can't fetch vim-fugitive"
+}
+
+cleanup() {
+  t kill-server 2> /dev/null || true
+  rm -rf "$DIR"
+}
+
+# Start the editor: vim ARGS, wait until it has started
+editor() {
+  local i
+  t kill-server 2> /dev/null || true
+  t new-session -d -x 120 -y 30 vim -n -N -u NONE -i NONE \
+    --servername "$SERVER" --cmd "set rtp^=$ROOT,$FUGITIVE hidden" \
+    -c 'runtime plugin/fugitive.vim' "$@"
+  for i in $(seq 50); do
+    [ "$(expr 'v:vim_did_enter' 2> /dev/null)" == 1 ] && return
+    sleep 0.1
+  done
+  die "Vim didn't start: $*"
+}
+
+expr() {
+  vim --servername "$SERVER" --remote-expr "$1"
+}
+
+# Type keys as the human, then give Vim time to handle them
+keys() {
+  t send-keys "$@"
+  sleep 0.3
+}
+
+# Call OP ARGS through the handler; sets OUT and STATUS
+call() {
+  OUT=$("$HANDLER" "vim-server:$SERVER" "$@" 2>&1) && STATUS=0 || STATUS=$?
+}
+
+# replace FILE OLD NEW, with OLD and NEW given as text
+replace() {
+  printf '%s' "$2" > "$TEST_DIR/old"
+  printf '%s' "$3" > "$TEST_DIR/new"
+  call replace "$1" "$TEST_DIR/old" "$TEST_DIR/new"
+}
+
+# The lines of a file or a buffer, joined with |
+disk() {
+  paste -sd '|' "$1"
+}
+
+buffer() {
+  expr "getbufline('$1', 1, '\$')->join('|')"
+}
+
+check() {
+  [ "$2" == "$3" ] && return
+  echo "FAIL $TEST: $1: expected '$3', got '$2'"
+  FAILED=$((FAILED + 1))
+}
+
+check_has() {
+  [[ $2 == *"$3"* ]] && return
+  echo "FAIL $TEST: $1: '$2' lacks '$3'"
+  FAILED=$((FAILED + 1))
+}
+
+test_context() {
+  printf 'one\ntwo\n' > "$TEST_DIR/f"
+  editor "$TEST_DIR/f"
+  keys 2G l
+  call context
+  check status "$STATUS" 0
+  check_has buffer "$OUT" "\"buffer\":\"$TEST_DIR/f\""
+  check_has line "$OUT" '"line":2'
+  check_has col "$OUT" '"col":2'
+  check_has mode "$OUT" '"mode":"normal"'
+  check_has selection "$OUT" '"selection":null'
+}
+
+# Columns count characters, the end is exclusive
+test_selection() {
+  printf 'привет\n' > "$TEST_DIR/f"
+  editor "$TEST_DIR/f"
+  keys 0 2l v 2l
+  call context
+  check_has mode "$OUT" '"mode":"visual"'
+  check_has start "$OUT" '"start":[1,3]'
+  check_has end "$OUT" '"end":[1,6]'
+  call selection
+  check text "$OUT" иве
+}
+
+test_selection_exclusive() {
+  printf 'привет\n' > "$TEST_DIR/f"
+  editor --cmd 'set selection=exclusive' "$TEST_DIR/f"
+  keys 0 2l v 2l
+  call context
+  check_has end "$OUT" '"end":[1,5]'
+  call selection
+  check text "$OUT" ив
+}
+
+test_read_unsaved() {
+  printf 'one\ntwo\n' > "$TEST_DIR/f"
+  editor "$TEST_DIR/f"
+  keys 2G cc TWO Escape
+  call read "$TEST_DIR/f" 2 2
+  check status "$STATUS" 0
+  check_has text "$OUT" TWO
+}
+
+test_open() {
+  printf 'one\nдва\n' > "$TEST_DIR/f"
+  editor
+  call open "$TEST_DIR/f" 2 3
+  check status "$STATUS" 0
+  check file "$(expr 'expand("%:p")')" "$TEST_DIR/f"
+  check cursor "$(expr 'line(".") .. "," .. charcol(".")')" 2,3
+}
+
+test_replace_in_place() {
+  seq 100 > "$TEST_DIR/f"
+  editor "$TEST_DIR/f"
+  keys 50G
+  local view
+  view=$(expr 'line("w0") .. "," .. line(".")')
+  replace "$TEST_DIR/f" 52 fifty-two
+  check status "$STATUS" 0
+  check disk "$(sed -n 52p "$TEST_DIR/f")" fifty-two
+  check buffer "$(expr 'getline(52)')" fifty-two
+  check view "$(expr 'line("w0") .. "," .. line(".")')" "$view"
+}
+
+test_replace_background() {
+  printf 'one\ntwo\n' > "$TEST_DIR/f"
+  editor
+  replace "$TEST_DIR/f" two TWO
+  check status "$STATUS" 0
+  check disk "$(disk "$TEST_DIR/f")" 'one|TWO'
+  check unloaded "$(expr "bufloaded('$TEST_DIR/f')")" 0
+}
+
+test_replace_not_unique() {
+  printf 'one\ntwo\n' > "$TEST_DIR/f"
+  editor
+  replace "$TEST_DIR/f" o O
+  check status "$STATUS" 1
+  replace "$TEST_DIR/f" three THREE
+  check status "$STATUS" 1
+  check disk "$(disk "$TEST_DIR/f")" 'one|two'
+}
+
+test_replace_unsaved() {
+  printf 'one\ntwo\n' > "$TEST_DIR/f"
+  editor "$TEST_DIR/f"
+  keys 1G cc ONE Escape
+  replace "$TEST_DIR/f" two TWO
+  check status "$STATUS" 3
+  check buffer "$(buffer "$TEST_DIR/f")" 'ONE|two'
+}
+
+# Refused before the buffer changes, twice: nothing stays behind
+test_replace_read_only_file() {
+  printf 'one\ntwo\n' > "$TEST_DIR/f"
+  chmod 444 "$TEST_DIR/f"
+  editor
+  replace "$TEST_DIR/f" two TWO
+  check status "$STATUS" 1
+  replace "$TEST_DIR/f" two TWO
+  check "second status" "$STATUS" 1
+  check "no buffer" "$(expr "bufexists('$TEST_DIR/f')")" 0
+  chmod 644 "$TEST_DIR/f"
+}
+
+# The file lost write permission after the human opened it
+test_replace_file_made_read_only() {
+  printf 'one\ntwo\n' > "$TEST_DIR/f"
+  editor "$TEST_DIR/f"
+  chmod 444 "$TEST_DIR/f"
+  replace "$TEST_DIR/f" two TWO
+  check status "$STATUS" 1
+  check buffer "$(buffer "$TEST_DIR/f")" 'one|two'
+  chmod 644 "$TEST_DIR/f"
+}
+
+test_replace_read_only_buffer() {
+  printf 'one\ntwo\n' > "$TEST_DIR/f"
+  editor -R "$TEST_DIR/f"
+  replace "$TEST_DIR/f" two TWO
+  check status "$STATUS" 1
+  check buffer "$(buffer "$TEST_DIR/f")" 'one|two'
+  check unmodified "$(expr '&modified')" 0
+}
+
+test_replace_nomodifiable() {
+  printf 'one\ntwo\n' > "$TEST_DIR/f"
+  editor -M "$TEST_DIR/f"
+  replace "$TEST_DIR/f" two TWO
+  check status "$STATUS" 1
+  check disk "$(disk "$TEST_DIR/f")" 'one|two'
+}
+
+# A failed write that leaves the file intact drops the change
+test_replace_write_fails() {
+  printf 'one\ntwo\n' > "$TEST_DIR/f"
+  editor --cmd "autocmd BufWriteCmd * throw 'write failed'"
+  replace "$TEST_DIR/f" two TWO
+  check status "$STATUS" 1
+  check disk "$(disk "$TEST_DIR/f")" 'one|two'
+  check unloaded "$(expr "bufloaded('$TEST_DIR/f')")" 0
+}
+
+# A failed write that damages the file keeps its full text in a buffer
+test_replace_write_damages() {
+  printf 'one\ntwo\n' > "$TEST_DIR/f"
+  local truncate="call writefile(['o'], expand('<amatch>'))"
+  editor --cmd "autocmd BufWriteCmd * $truncate | throw 'write failed'"
+  replace "$TEST_DIR/f" two TWO
+  check status "$STATUS" 1
+  check_has message "$OUT" 'may be damaged'
+  check listed "$(expr "buflisted('$TEST_DIR/f')")" 1
+  check buffer "$(buffer "$TEST_DIR/f")" 'one|TWO'
+}
+
+# A BufNewFile template doesn't end up in the file
+test_create() {
+  editor --cmd "autocmd BufNewFile * call setline(1, ['t1', 't2', 't3'])"
+  printf 'new\n' > "$TEST_DIR/text"
+  call create "$TEST_DIR/sub/f" "$TEST_DIR/text"
+  check status "$STATUS" 0
+  check disk "$(disk "$TEST_DIR/sub/f")" new
+  call create "$TEST_DIR/sub/f" "$TEST_DIR/text"
+  check "exists" "$STATUS" 1
+}
+
+test_reload() {
+  printf 'one\n' > "$TEST_DIR/f"
+  editor "$TEST_DIR/f"
+  sleep 1
+  printf 'ONE\n' > "$TEST_DIR/f"
+  call reload
+  check status "$STATUS" 0
+  check buffer "$(buffer "$TEST_DIR/f")" ONE
+}
+
+test_reload_unsaved() {
+  printf 'one\n' > "$TEST_DIR/f"
+  editor "$TEST_DIR/f"
+  keys cc changed Escape
+  call reload
+  check status "$STATUS" 3
+  check buffer "$(buffer "$TEST_DIR/f")" changed
+}
+
+# A terminal with a running job counts as changed, but isn't a file
+test_reload_terminal() {
+  editor -c 'terminal ++hidden sleep 100'
+  call reload
+  check status "$STATUS" 0
+}
+
+# A repo whose history the tests rewrite: s is the series under review
+make_repo() {
+  local repo=$TEST_DIR/repo
+  git init -q -b main "$repo"
+  commit() {
+    echo "$2" >> "$repo/$1"
+    git -C "$repo" add .
+    git -C "$repo" commit -qm "$3"
+  }
+  commit a x base
+  git -C "$repo" tag base
+  commit a 1 A
+  commit b 1 B
+  commit a 2 'fixup! A'
+  commit b 2 'fixup! B'
+  commit a 3 'fixup! A'
+  commit c 1 C
+  git -C "$repo" branch s
+}
+
+# The index and subject of the commit the human is on
+reviewed() {
+  local idx
+  idx=$(expr 'getqflist({"idx": 0}).idx')
+  echo "$idx $(expr "getqflist()[$idx - 1].text")"
+}
+
+test_review_not_a_range() {
+  make_repo
+  editor
+  call review "$TEST_DIR/repo" --all
+  check status "$STATUS" 1
+}
+
+# The review is a queue: a squashed commit moves the human to the next one
+test_review_squash() {
+  make_repo
+  editor
+  call review "$TEST_DIR/repo" base..s
+  check status "$STATUS" 0
+  # From the newest: C, fixup! A, fixup! B, fixup! A, B, A
+  keys ':cc 4' Enter
+  git -C "$TEST_DIR/repo" checkout -q -b squashed base
+  git -C "$TEST_DIR/repo" cherry-pick s~5 > /dev/null
+  git -C "$TEST_DIR/repo" cherry-pick -n s~3 > /dev/null
+  git -C "$TEST_DIR/repo" commit -q --amend --no-edit
+  git -C "$TEST_DIR/repo" cherry-pick s~4 s~2 s~1 s > /dev/null
+  git -C "$TEST_DIR/repo" branch -f s squashed
+  call review "$TEST_DIR/repo" base..s
+  check next "$(reviewed)" '3 fixup! B'
+}
+
+test_review_amend() {
+  make_repo
+  editor
+  call review "$TEST_DIR/repo" base..s
+  keys ':cc 5' Enter
+  git -C "$TEST_DIR/repo" checkout -q -b amended base
+  git -C "$TEST_DIR/repo" cherry-pick s~5 > /dev/null
+  git -C "$TEST_DIR/repo" cherry-pick s~4 > /dev/null
+  git -C "$TEST_DIR/repo" commit -q --amend -m B -m amended
+  git -C "$TEST_DIR/repo" cherry-pick s~3 s~2 s~1 s > /dev/null
+  git -C "$TEST_DIR/repo" branch -f s amended
+  call review "$TEST_DIR/repo" base..s
+  check same "$(reviewed)" '5 B'
+}
+
+run() {
+  local failed=$FAILED
+  TEST=$1
+  TEST_DIR=$DIR/$1
+  SERVER=$TEST_DIR/vim
+  mkdir -p "$TEST_DIR"
+  "$1"
+  t kill-server 2> /dev/null || true
+  if [ $FAILED -eq $failed ]; then
+    echo "ok $1"
+  fi
+}
+
+if [ "$1" == "-h" -o "$1" == "--help" ]; then
+  usage
+  exit 0
+fi
+command -v tmux > /dev/null || die "tmux is not installed"
+vim --version | grep -q '+clientserver' || die "Vim lacks +clientserver"
+trap cleanup EXIT
+fetch_fugitive
+# Commits in test repos don't depend on the user's git config
+export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.com
+export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
+
+TESTS=("$@")
+[ $# -gt 0 ] || TESTS=($(declare -F | cut -d' ' -f3 | grep '^test_'))
+for test in "${TESTS[@]}"; do
+  declare -F "$test" > /dev/null || die "No such test: $test"
+  run "$test"
+done
+[ $FAILED -eq 0 ] || die "$FAILED failed"
