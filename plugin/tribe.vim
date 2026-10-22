@@ -21,14 +21,14 @@ def Set(name: string, value: string)
 enddef
 
 def Clear()
-  var output = system($'tribe clear')
+  system('tribe clear')
 enddef
 
 def Register()
-  var output = system($'tribe can-join')
+  system('tribe can-join')
   if v:shell_error == 127 && !empty(v:servername)
     echohl WarningMsg
-    echomsg $'tribe is not installed'
+    echomsg 'tribe is not installed'
     echohl None
   endif
   if v:shell_error != 0
