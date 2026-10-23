@@ -75,6 +75,17 @@ call() {
   OUT=$("$HANDLER" "vim-server:$SERVER" "$@" 2>&1) && STATUS=0 || STATUS=$?
 }
 
+# Call review ARGS, then wait for Vim to show it: it does so after
+# answering
+review() {
+  call review "$@"
+  [ "$STATUS" -eq 0 ] || return 0
+  for _ in $(seq 100); do
+    [ "$(expr 'get(g:, "hunch_reviewing", 0) ? 1 : 0')" == 0 ] && return 0
+    sleep 0.1
+  done
+}
+
 # replace FILE OLD NEW, with OLD and NEW given as text
 replace() {
   printf '%s' "$2" > "$TEST_DIR/old"
@@ -336,7 +347,7 @@ test_review_not_a_range() {
 test_review_squash() {
   make_repo
   editor
-  call review "$TEST_DIR/repo" base..s
+  review "$TEST_DIR/repo" base..s
   check status "$STATUS" 0
   # From the newest: C, fixup! A, fixup! B, fixup! A, B, A
   keys ':cc 4' Enter
@@ -346,14 +357,14 @@ test_review_squash() {
   git -C "$TEST_DIR/repo" commit -q --amend --no-edit
   git -C "$TEST_DIR/repo" cherry-pick s~4 s~2 s~1 s > /dev/null
   git -C "$TEST_DIR/repo" branch -f s squashed
-  call review "$TEST_DIR/repo" base..s
+  review "$TEST_DIR/repo" base..s
   check next "$(reviewed)" '3 fixup! B'
 }
 
 test_review_amend() {
   make_repo
   editor
-  call review "$TEST_DIR/repo" base..s
+  review "$TEST_DIR/repo" base..s
   keys ':cc 5' Enter
   git -C "$TEST_DIR/repo" checkout -q -b amended base
   git -C "$TEST_DIR/repo" cherry-pick s~5 > /dev/null
@@ -361,7 +372,7 @@ test_review_amend() {
   git -C "$TEST_DIR/repo" commit -q --amend -m B -m amended
   git -C "$TEST_DIR/repo" cherry-pick s~3 s~2 s~1 s > /dev/null
   git -C "$TEST_DIR/repo" branch -f s amended
-  call review "$TEST_DIR/repo" base..s
+  review "$TEST_DIR/repo" base..s
   check same "$(reviewed)" '5 B'
 }
 

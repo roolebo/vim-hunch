@@ -2,6 +2,11 @@ vim9script
 # Editor side of the hunch editor protocol, called by bin/hunch-handler
 # through `vim --remote-expr`. Every function returns the exit status of
 # the operation on the first line and its output after it.
+#
+# Vim answers a remote expression from its main loop and does nothing else
+# until it returns: no keys, no redraw, no job or channel output. So a
+# function only checks and edits buffers; anything that waits on a job,
+# as fugitive's commands do, runs from a timer after the answer.
 
 const OK = 0
 const ERROR = 1
@@ -425,6 +430,24 @@ def CommitView(): dict<any>
   return {}
 enddef
 
+# Go to entry NEXT of the quickfix list, if any, once :Gclog, which fills
+# it from a job, has listed COUNT commits, and restore VIEW; give up after
+# TRIES. g:hunch_reviewing is false once done.
+def GoWhenListed(next: number, count: number, view: dict<any>,
+    tries: number)
+  if len(getqflist()) < count && tries > 0
+    timer_start(20, (_) => GoWhenListed(next, count, view, tries - 1))
+    return
+  endif
+  if next >= 0
+    execute $'cc {next + 1}'
+    if !empty(view)
+      winrestview(view)
+    endif
+  endif
+  g:hunch_reviewing = false
+enddef
+
 def IsRange(repo: string, range: string): bool
   # git would take it as an option
   if range =~ '^-'
@@ -439,12 +462,38 @@ export def Review(repo: string, range: string): string
     return Result(ERROR, $'not a revision range in {repo}: {range}')
   endif
 
+  # The subjects :Gclog will list, newest first, to find the commit to
+  # come back to before showing anything
   var tab = ReviewTab(repo)
-  var reviewed = {}
-  var subject = ''
+  var reviewed = tab > 0 ? Reviewed(range) : {}
+  var subjects = systemlist($'git -C {shellescape(repo)} log --format=%s '
+    .. shellescape(range))
+  var next = -1
+  var keep_view = false
+  if !empty(reviewed)
+    var match = Align(reviewed.subjects, subjects)
+    next = NextReviewed(match, reviewed.idx)
+    # Only the same commit keeps the view, the next one starts at the top
+    keep_view = match[reviewed.idx] >= 0
+  endif
+
+  # :Gclog waits for git's output, which Vim doesn't read while it answers
+  # a remote expression: show the review once this answer is sent
+  g:hunch_reviewing = true
+  timer_start(0, (_) => ShowReview(repo, range, tab, next, keep_view,
+    len(subjects)))
+
+  if tab == 0
+    return Result(OK, $'showing {range} in a new tab')
+  endif
+  var at = next < 0 ? '' : $' at "{subjects[next]}"'
+  return Result(OK, $'showing {range} again{at}')
+enddef
+
+def ShowReview(repo: string, range: string, tab: number, next: number,
+    keep_view: bool, count: number)
   var view = {}
   if tab > 0
-    reviewed = Reviewed(range)
     execute $'tabnext {tab}'
     view = CommitView()
     only!
@@ -457,29 +506,13 @@ export def Review(repo: string, range: string): string
 
   if exists(':Gclog') == 2
     execute 'Gclog ' .. fnameescape(range)
-    if !empty(reviewed)
-      var match = Align(reviewed.subjects, Subjects())
-      var i = NextReviewed(match, reviewed.idx)
-      if i >= 0
-        execute $'cc {i + 1}'
-        subject = Subjects()[i]
-      endif
-      # Only the same commit keeps the view, the next one starts at the top
-      if match[reviewed.idx] >= 0 && !empty(view)
-        winrestview(view)
-      endif
-    endif
+    GoWhenListed(next, count, keep_view ? view : {}, 500)
   else
     setline(1, systemlist($'git log -p {shellescape(range)}'))
     setlocal buftype=nofile bufhidden=wipe filetype=git nomodified
+    g:hunch_reviewing = false
   endif
-
   redraw
-  if tab == 0
-    return Result(OK, $'showing {range} in a new tab')
-  endif
-  var at = empty(subject) ? '' : $' at "{subject}"'
-  return Result(OK, $'showing {range} again{at}')
 enddef
 
 export def Reload(): string
