@@ -1,43 +1,43 @@
-" vim-tribe - AI augmentation that makes sense
+" vim-hunch - AI augmentation that makes sense
 " Maintainer:	Roman Bolshakov <roman@subtile.systems>
 " License: MIT
 
 vim9script
 
-if exists("g:loaded_tribe")
+if exists("g:loaded_hunch")
   finish
 endif
-g:loaded_tribe = 1
+g:loaded_hunch = 1
 
-const handler = expand('<sfile>:p:h:h') .. '/bin/tribe-handler'
+const handler = expand('<sfile>:p:h:h') .. '/bin/hunch-handler'
 
 def Set(name: string, value: string)
-  var output = system($'tribe set {name} {shellescape(value)}')
+  var output = system($'hunch set {name} {shellescape(value)}')
   if v:shell_error != 0
     echohl WarningMsg
-    echomsg $'vim-tribe: cannot set {name}: {trim(output)}'
+    echomsg $'vim-hunch: cannot set {name}: {trim(output)}'
     echohl None
   endif
 enddef
 
 def Clear()
-  system('tribe clear')
+  system('hunch clear')
 enddef
 
 def Register()
-  system('tribe can-join')
+  system('hunch can-join')
   if v:shell_error == 127 && !empty(v:servername)
     echohl WarningMsg
-    echomsg 'tribe is not installed'
+    echomsg 'hunch is not installed'
     echohl None
   endif
   if v:shell_error != 0
     return
   endif
-  # The address in tribe is a socket path
+  # The address in hunch is a socket path
   if !has('socketserver')
     echohl ErrorMsg
-    echomsg 'vim-tribe: Vim lacks +socketserver'
+    echomsg 'vim-hunch: Vim lacks +socketserver'
     echohl None
     return
   endif
@@ -49,7 +49,7 @@ def Register()
   Set('handler', handler)
 enddef
 
-augroup tribe
+augroup hunch
     autocmd!
     autocmd VimEnter * Register()
     autocmd VimLeave * Clear()

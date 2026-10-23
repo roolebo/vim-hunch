@@ -1,5 +1,5 @@
 vim9script
-# Editor side of the tribe editor protocol, called by bin/tribe-handler
+# Editor side of the hunch editor protocol, called by bin/hunch-handler
 # through `vim --remote-expr`. Every function returns the exit status of
 # the operation on the first line and its output after it.
 
@@ -350,7 +350,7 @@ enddef
 
 def ReviewTab(repo: string): number
   for tab in range(1, tabpagenr('$'))
-    if gettabvar(tab, 'tribe_review', '') == repo
+    if gettabvar(tab, 'hunch_review', '') == repo
       return tab
     endif
   endfor
@@ -451,7 +451,7 @@ export def Review(repo: string, range: string): string
     hide enew
   else
     tabnew
-    t:tribe_review = repo
+    t:hunch_review = repo
   endif
   execute 'tcd ' .. fnameescape(repo)
 

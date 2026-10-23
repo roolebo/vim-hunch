@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# tribe-handler: the tribe editor protocol for Vim.
+# hunch-handler: the hunch editor protocol for Vim.
 #
-# vim-tribe registers this script as the handler of a Vim started with
-# --servername. Each operation calls tribe#remote#* in that Vim through
+# vim-hunch registers this script as the handler of a Vim started with
+# --servername. Each operation calls hunch#remote#* in that Vim through
 # --remote-expr, which replies with the exit status on the first line and
 # the output after it. Never prompts.
 #
@@ -106,10 +106,10 @@ case "$OP" in
     ;;
 esac
 
-ANSWER=$(vim --servername "$SOCKET" --remote-expr "tribe#remote#$CALL" 2>&1) ||
+ANSWER=$(vim --servername "$SOCKET" --remote-expr "hunch#remote#$CALL" 2>&1) ||
   die "Cannot reach Vim at $SOCKET: $ANSWER"
 STATUS=$(head -1 <<< "$ANSWER")
-is_num "$STATUS" || die "Unexpected reply from Vim, update vim-tribe: $ANSWER"
+is_num "$STATUS" || die "Unexpected reply from Vim, update vim-hunch: $ANSWER"
 OUTPUT=$(tail -n +2 <<< "$ANSWER")
 
 if [ "$STATUS" -eq 0 ]; then
