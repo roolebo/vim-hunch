@@ -7,5 +7,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y vim tmux jq
+      - run: sudo apt-get update && sudo apt-get install -y tmux jq libncurses-dev
+      # Ubuntu's Vim has neither +socketserver nor a usable +clientserver
+      - name: Build Vim
+        run: |
+          git clone -q --depth 1 --branch v9.1.2141 https://github.com/vim/vim /tmp/vim
+          cd /tmp/vim
+          ./configure -q --with-features=huge --without-x --enable-gui=no
+          make -s -j"$(nproc)"
+          sudo make -s install
+      - run: vim --version | grep -E '[+-](socketserver|clientserver)'
       - run: test/run
